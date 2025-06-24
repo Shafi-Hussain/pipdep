@@ -115,7 +115,7 @@ async def _query_helper(sess: ClientSession, pkg: NormalizedName, server_cfg: li
             elif cfg["auth"]["type"] == "EnvironmentToken":
                 auth = BasicAuth(login=os.getenv(cfg["auth"]["username"]), password=os.getenv(cfg["auth"]["password"]))
         # print("Sending request to:", cfg["url"].format(pkg), "with auth", auth)
-        logger.info(f"Sending request to: {cfg["url"].format(pkg)}")
+        logger.info(f"Sending request to: {cfg['url'].format(pkg)}")
         logger.debug(f"Authorization for request is: {auth}")
         async with sess.get(url=cfg["url"].format(pkg), auth=auth) as resp:
             for a_tag in BeautifulSoup(await resp.content.read(), "lxml").find_all('a'):
