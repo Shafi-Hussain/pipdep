@@ -267,8 +267,7 @@ def _choose_wheels(
     logger.debug(f"_choose_wheels(): Accepted for version={pkg_requirement.specifier.contains(pkg_version)}")
     logger.debug(
         f"_choose_wheels(): Accepted for tags={any(tag == r_tag for tag in tags for r_tag in valid_profile_tags)}")
-    logger.info(f"_choose_wheels(): Choose wheel={pkg_requirement.specifier.contains(pkg_version) \
-                                                  and all(tag in valid_profile_tags for tag in tags)}")
+    logger.info(f"_choose_wheels(): Choose wheel={pkg_requirement.specifier.contains(pkg_version) and all(tag in valid_profile_tags for tag in tags)}")
     return pkg_requirement.specifier.contains(pkg_version) \
         and any(tag == r_tag for tag in tags for r_tag in valid_profile_tags)
 
