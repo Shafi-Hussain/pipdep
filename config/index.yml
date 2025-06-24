@@ -1,0 +1,12 @@
+index-urls:
+  - url: https://pypi.org/simple/{}
+  - url: https://server1.org/simple/{}
+    auth:
+      type: Basic
+      username: CoolUser
+      password: CoolPassword
+  - url: https://server2.org/simple/{}
+    auth:
+      type: EnvironmentToken
+      username: USER_VAR
+      password: PASSWORD_OR_TOKEN_VAR
