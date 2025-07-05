@@ -122,16 +122,7 @@ async def _query_helper(sess: ClientSession, pkg: NormalizedName, server_cfg: li
                 logger.info(f"Found anchor tag with text: {a_tag.get_text()}")
                 # if relative path, change to absolute path
                 if not a_tag['href'].startswith("http"):
-                    # JFROG Artifactory HACK
-                    # why endswith()? Authentication would precede this
-                    if urlparse(cfg["url"]).netloc.endswith("na.artifactory.swg-devops.com"):
-                        # print("OLD:",a_tag["href"])
-                        a_tag['href'] = urljoin(cfg["url"], a_tag['href'][1:])
-                        # print("NEW:", a_tag["href"])
-                    else:
-                        # print("OLD:", a_tag["href"])
-                        a_tag['href'] = urljoin(cfg["url"], a_tag['href'])
-                        # print("NEW:", a_tag["href"])
+                    a_tag['href'] = urljoin(cfg["url"].format(pkg), a_tag['href'])
                 anchor_tags.append(a_tag)
                 # print(a_tag['href'])
                 logger.info(f"Anchor tag url: {a_tag['href']}")
