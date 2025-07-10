@@ -51,9 +51,6 @@ def _merge_specifiers(a: SpecifierSet, b: SpecifierSet):
         return a
     return SpecifierSet(f"{a},{b}")
 
-
-EXTRA_INDEX_URLS = "PIPDEP_EXTRA_INDEX_URL"
-
 # CRITICAL = 50
 # FATAL = CRITICAL
 # ERROR = 40
@@ -96,16 +93,14 @@ Currently, it gets one dependency at a time and resolves it, adding all transiti
 dependencies in the queue. 
 I can send a batch request for transitive dependencies in each layer,
 but I need some way to wait/know when everything is completed...
+
+==== TODO():
+    Switch to DFS. Resolving with BFS, I cannot go back to the parent to ease constraints
+    to choose different requirements for child dependencies
 '''
 
 
 async def _query_helper(sess: ClientSession, pkg: NormalizedName, server_cfg: list[dict]):
-    # urls = [PYPI.format(pkg)]
-    # if os.getenv(EXTRA_INDEX_URLS, None):
-    #     # TODO(): Add help - multiple index url should be comma separated
-    #     # why not ':' separated? Authentication maybe ':' separated embedded in url
-    #     for idx_url in os.getenv(EXTRA_INDEX_URLS).split(","):
-    #         urls.append(f"{idx_url.rstrip('/')}/{pkg}")
     anchor_tags = []
     for cfg in server_cfg:
         auth = None
@@ -122,9 +117,12 @@ async def _query_helper(sess: ClientSession, pkg: NormalizedName, server_cfg: li
                 logger.info(f"Found anchor tag with text: {a_tag.get_text()}")
                 # if relative path, change to absolute path
                 if not a_tag['href'].startswith("http"):
-                    a_tag['href'] = urljoin(cfg["url"].format(pkg), a_tag['href'])
+                    # need to figure out why artifactory links are like this...
+                    if urlparse(cfg["url"]).netloc.endswith("na.artifactory.swg-devops.com"):
+                        a_tag['href'] = urljoin(cfg["url"].format(pkg), a_tag['href'][1:])
+                    else:
+                        a_tag['href'] = urljoin(cfg["url"].format(pkg), a_tag['href'])
                 anchor_tags.append(a_tag)
-                # print(a_tag['href'])
                 logger.info(f"Anchor tag url: {a_tag['href']}")
     return anchor_tags
 
@@ -146,23 +144,19 @@ async def get_wheel_metadata(client: ClientSession, wheel_url: str, server_cfg: 
         # Try Meta URL
         meta_url = f"{wheel_url.split('#')[0]}.metadata"
         logger.info(f"Trying to get wheel metadata from: {meta_url}")
-        # print("=====META URL=====")
-        # print(meta_url)
-        # print(urlparse(meta_url).netloc)
-        resp = await client.get(meta_url, auth=auth)
-        if resp.status == 404:
-            logger.info(f"HTTP 404 - for - {meta_url}")
-            raise Exception()
-        return await resp.content.read()
+        async with client.get(meta_url, auth=auth) as resp:
+            if resp.status == 404:
+                logger.info(f"HTTP 404 - for - {meta_url}")
+                raise Exception()
+            return await resp.content.read()
     except Exception as _:
         # if failed, get wheel metadata
-        # print("=====WHEEL URL=====")
-        # print(wheel_url)
-        # print(urlparse(wheel_url).netloc)
         logger.info(f"Trying to parse metadata from: {wheel_url}")
-        h_request = await client.head(wheel_url, auth=auth)
-        logger.debug(f"HEAD Request: headers={h_request.headers}")
-        content_length = h_request.headers.get('Content-Length')
+        async with client.head(url=wheel_url, auth=auth) as h_request:
+            h_request.raise_for_status()
+            logger.debug(f"HEAD Request: headers={h_request.headers}")
+            content_length = h_request.headers.get('Content-Length')
+
         if content_length is None:
             raise ValueError('Could not determine Content-Length')
         content_length = int(content_length)
@@ -170,59 +164,43 @@ async def get_wheel_metadata(client: ClientSession, wheel_url: str, server_cfg: 
         start_byte = max(0, content_length - central_dir_chunk * 1024)
         byte_range = f"bytes={start_byte}-{content_length - 1}"
 
-        g_request = await client.get(wheel_url, headers={'Range': byte_range}, auth=auth)
-        wheel_cd_bytes = await g_request.content.read()
-        wheel_cds = wheel_cd_bytes[
-                    wheel_cd_bytes.find(_ZIP_CD_START): wheel_cd_bytes.rfind(_ZIP_CD_END) + 4]
-        entries = [(i, m.start()) for i, m in enumerate(finditer(_ZIP_CD_START, wheel_cds))]
-        for i, j in entries:
-            if wheel_cds[j - len(_FILENAME_ENC): j] == _FILENAME_ENC:
-                '''
-                File header:
-                central file header signature   4 bytes  (0x02014b50)
-                version made by                 2 bytes
-                version needed to extract       2 bytes
-                general purpose bit flag        2 bytes
-                compression method              2 bytes
-                last mod file time              2 bytes
-                last mod file date              2 bytes
-                crc-32                          4 bytes
-                compressed size                 4 bytes
-                uncompressed size               4 bytes
-                file name length                2 bytes
-                extra field length              2 bytes
-                file comment length             2 bytes
-                disk number start               2 bytes
-                internal file attributes        2 bytes
-                external file attributes        4 bytes
-                relative offset of local header 4 bytes
+        async with client.get(url=wheel_url, auth=auth, headers={'Range': byte_range}) as g_request:
+            g_request.raise_for_status()
+            wheel_cd_bytes = await g_request.content.read()
+        pos = wheel_cd_bytes.find(_ZIP_CD_START)
+        while pos < len(wheel_cd_bytes):
+            (
+                sig, ver_made, ver_needed, flags, compression, mod_time, mod_date,
+                crc32, comp_size, uncomp_size, fname_len, extra_len, comment_len,
+                disk_start, int_attr, ext_attr, rel_offset
+            ) = unpack('<IHHHHHHIIIHHHHHII', wheel_cd_bytes[pos:pos + 46])
 
-                file name (variable size)
-                extra field (variable size)
-                file comment (variable size)
-                '''
-                matching_entry = wheel_cds[entries[i - 1][1]:j]
-                fmt = "<4s6H4s2i5H2i"  # 4*1 + 6*2 + 4*1 + 2*4 + 5*2 + 2*4 = 46
-                remainder = len(matching_entry) - 46
-                fmt_mod = f"{fmt}{remainder}s"
-                _, _, _, _, _, _, _, _, compressed_size, _, _, _, _, _, _, _, rel_off_local_head, _ = unpack(
-                    fmt_mod, matching_entry)
+            filename = wheel_cd_bytes[pos + 46: pos + 46 + fname_len].decode('utf-8')
+            if os.path.basename(filename) != _FILENAME:
+                pos += 46 + fname_len + extra_len + comment_len
+                continue
+            local_header_range = f"bytes={rel_offset}-{rel_offset + 30 - 1}"
+            async with client.get(url=wheel_url, auth=auth, headers={'Range': local_header_range}) as l_request:
+                l_request.raise_for_status()
+                local_header = await l_request.content.read()
 
-                # Get actual file data
-                # Need a buffer as the DEFLATE stream doesn't start at rel_off_local_head
-                # It if followed by some metadata - filename, file size, crc etc. To avoid complexity,
-                # Fetch a few hundred extra bytes and search for the filename (b'METADATA'). The DEFLATE stream
-                # starts exactly after the end of filename and is exactly compressed_size bytes in length
-                meta_bytes = f"bytes={rel_off_local_head}-{rel_off_local_head + compressed_size + buffer}"
-                meta_request = await client.get(wheel_url, headers={'Range': meta_bytes}, auth=auth)
-                wheel_bin = await meta_request.content.read()
-                compressed_metadata = wheel_bin[
-                                      wheel_bin.find(_FILENAME_ENC) + len(
-                                          _FILENAME_ENC):wheel_bin.find(
-                                          _FILENAME_ENC) + len(
-                                          _FILENAME_ENC) + compressed_size]
-                decompressed_metadata = decompress(compressed_metadata, wbits=-MAX_WBITS)
-                return decompressed_metadata
+                (
+                    sig, ver_needed, flags, compression_method,
+                    mod_time, mod_date, crc32_lfh, comp_size_lfh, uncomp_size_lfh,
+                    fname_len_lfh, extra_len_lfh
+                ) = unpack('<IHHHHHIIIHH', local_header)
+
+            data_bytes_range = f"bytes={rel_offset + 30 + fname_len_lfh + extra_len_lfh}-{rel_offset + 30 + fname_len_lfh + extra_len_lfh + comp_size - 1}"
+            async with client.get(url=wheel_url, auth=auth, headers={'Range': data_bytes_range}) as d_request:
+                d_request.raise_for_status()
+                data = await d_request.content.read()
+
+                if compression_method == 8:  # DEFLATE
+                    return decompress(data, wbits=-MAX_WBITS)
+                elif compression_method == 0:  # STORE
+                    return data
+                else:
+                    raise Exception(f"Unknown compression method: {compression_method}")
         raise NotADirectoryError(
             f'METADATA not found in the central directory [central_dir_chunk={central_dir_chunk}]. '
             f'Maybe try increasing he central_dir_chunk')
@@ -373,6 +351,9 @@ def get_latest_irrespective_of_platform(wheel_tags_list: list[BSTag], req: Requi
 
 
 async def try_finding_github(client: ClientSession, pkg_name: NormalizedName):
+    '''
+    TODO() -> this function needs improvement
+    '''
     async with client.get(PYPI.format(pkg_name)) as resp:
         # soup = BeautifulSoup(await resp.content.read(), "lxml")
         # soup.find_all()
@@ -404,9 +385,13 @@ async def try_finding_github(client: ClientSession, pkg_name: NormalizedName):
             # return "/".join(meta.get("download_url").split("/")[:5])
             possible_urls.append(meta.get("download_url").strip())
 
+        # fix this ridiculous logic
         if not possible_urls:
             return "Could not find GitHub URL"
         possible_urls = list(sorted(filter(lambda u: "github.com" in u, possible_urls)))
+        if not possible_urls:
+            return "Could not find GitHub URL"
+        
         return "/".join(possible_urls[0].split("/")[:5])
 
 
